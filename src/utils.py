@@ -29,6 +29,22 @@ def get_data(ticker=str, api_key=str):
     return r.json()
 
 
+def validate_alpha_vantage_response(data: dict) -> None:
+    """
+    Validate that Alpha Vantage response contains monthly adjusted data.
+
+    Raises:
+        ValueError if expected data is missing.
+    """
+    if "Monthly Adjusted Time Series" not in data:
+        raise ValueError(
+            "Alpha Vantage response does not contain 'Monthly Adjusted Time Series'."
+        )
+
+    if not data["Monthly Adjusted Time Series"]:
+        raise ValueError("Monthly Adjusted Time Series is empty.")
+
+
 def plot_etf_data(ticker, etf_data):
     """
     Plot the adjusted close price for a given ETF ticker.

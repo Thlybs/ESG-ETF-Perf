@@ -237,9 +237,21 @@ def compute_beta(asset_returns, benchmark_returns) -> float:
         benchmark_returns (pd.Series): Returns of the benchmark.
 
     Returns:
-        float: Beta coefficient.
+        float: Beta coefficient, or NaN if beta is undefined.
     """
-    return np.cov(asset_returns, benchmark_returns)[0, 1] / np.var(benchmark_returns)
+
+    asset = asset_returns.dropna()
+    benchmark = benchmark_returns.dropna()
+
+    if len(asset) < 2 or len(benchmark) < 2:
+        return np.nan
+
+    variance = np.var(benchmark)
+    if variance == 0:
+        return np.nan
+
+    covariance = np.cov(asset, benchmark)[0, 1]
+    return covariance / variance
 
 
 def compute_tracking_error(
@@ -443,6 +455,39 @@ def _align_returns(asset_returns: pd.Series, benchmark_returns: pd.Series):
     return asset_returns.align(benchmark_returns, join="inner")
 
 
+def _rolling_alpha(
+    asset_returns: pd.Series,
+    benchmark_returns: pd.Series,
+    window: int,
+    periods_per_year: int,
+) -> pd.Series:
+    """
+    Compute rolling CAPM alpha (annualized).
+    """
+    aligned_asset, aligned_benchmark = asset_returns.align(
+        benchmark_returns, join="inner"
+    )
+
+    alphas = []
+
+    for i in range(len(aligned_asset)):
+        if i < window - 1:
+            alphas.append(np.nan)
+            continue
+
+        y = aligned_asset.iloc[i - window + 1 : i + 1].values
+        x = aligned_benchmark.iloc[i - window + 1 : i + 1].values
+
+        x = np.column_stack([np.ones(len(x)), x])  # intercept + market
+
+        coeffs = np.linalg.lstsq(x, y, rcond=None)[0]
+        alpha = coeffs[0] * periods_per_year  # annualized
+
+        alphas.append(alpha)
+
+    return pd.Series(alphas, index=aligned_asset.index)
+
+
 def compute_rolling_metrics(
     prices: pd.Series,
     window: int,
@@ -467,12 +512,14 @@ def compute_rolling_metrics(
 
     metrics = {}
 
+    # --- Price-based ---
     metrics["CAGR"] = _rolling_apply(
         prices, compute_cagr, window, periods_per_year=periods_per_year
     )
 
     metrics["Max Drawdown"] = _rolling_apply(prices, compute_max_drawdown, window)
 
+    # --- Return-based ---
     metrics["Volatility"] = returns.rolling(window).std() * np.sqrt(periods_per_year)
 
     metrics["Sharpe Ratio"] = _rolling_apply(
@@ -487,6 +534,7 @@ def compute_rolling_metrics(
         returns, compute_cvar, window, alpha=cvar_alpha
     )
 
+    # --- Benchmark-relative ---
     if benchmark_prices is not None:
         benchmark_returns = compute_log_returns(benchmark_prices)
         r, b = _align_returns(returns, benchmark_returns)
@@ -504,6 +552,8 @@ def compute_rolling_metrics(
             / excess.rolling(window).std()
             * np.sqrt(periods_per_year)
         )
+
+        metrics["Alpha"] = _rolling_alpha(r, b, window, periods_per_year)
 
     return pd.DataFrame(metrics)
 
@@ -553,3 +603,64 @@ def plot_rolling_metric(
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+
+def compute_regime_metrics(
+    price_df: pd.DataFrame,
+    benchmark_ticker: str,
+    regimes: dict,
+    cvar_alpha=0.95,
+):
+    """
+    Compute performance metrics by regime.
+
+    Args:
+        price_df (pd.DataFrame): Price data.
+        benchmark_ticker (str): Benchmark ticker.
+        regimes (dict): {name: (start, end)}.
+
+    Returns:
+        dict: {regime_name: summary_df}
+    """
+    results = {}
+
+    for name, (start, end) in regimes.items():
+        subset = price_df.loc[start:end]
+        if subset.dropna(how="all").empty:
+            continue
+
+        results[name] = compute_summary_table(
+            subset,
+            benchmark_ticker=benchmark_ticker,
+            cvar_alpha=cvar_alpha,
+        )
+
+    return results
+
+
+def crisis_performance_decomposition(
+    price_df: pd.DataFrame,
+    benchmark_ticker: str,
+    crisis_period: tuple,
+    recovery_period: tuple,
+):
+    """
+    Decompose performance into structural, crisis, and recovery components.
+    """
+
+    results = {
+        "Pre-crisis": compute_summary_table(
+            price_df.loc[: crisis_period[0]],
+            benchmark_ticker,
+        ),
+        "Crisis": compute_summary_table(
+            price_df.loc[crisis_period[0] : crisis_period[1]],
+            benchmark_ticker,
+        ),
+        "Recovery": compute_summary_table(
+            price_df.loc[recovery_period[0] : recovery_period[1]],
+            benchmark_ticker,
+        ),
+    }
+
+    return results
